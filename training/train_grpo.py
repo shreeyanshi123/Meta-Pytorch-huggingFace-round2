@@ -95,7 +95,7 @@ def main():
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         max_steps=500,
-        num_generations=8,
+        num_generations=4,
         save_steps=50,
         logging_steps=10,
         report_to="wandb" if os.getenv("WANDB_API_KEY") else "none"
