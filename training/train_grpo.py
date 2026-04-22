@@ -61,15 +61,20 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
-    # Auto-detect Apple Silicon (MPS)
-    device_map = "auto"
-    if torch.backends.mps.is_available():
-        device_map = "mps"
-        
+    # Set up 4-bit quantization for Colab T4
+    from transformers import BitsAndBytesConfig
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16
+    )
+    
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        device_map=device_map,
-        torch_dtype=torch.float16 if torch.backends.mps.is_available() else torch.float32,
+        device_map="auto",
+        quantization_config=bnb_config,
+        torch_dtype=torch.float16,
     )
     
     lora_config = LoraConfig(
