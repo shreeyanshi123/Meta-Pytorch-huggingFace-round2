@@ -99,7 +99,7 @@ def main():
         save_steps=50,
         logging_steps=10,
         bf16=False,
-        fp16=True,
+        fp16=False,
         report_to="wandb" if os.getenv("WANDB_API_KEY") else "none"
     )
     
