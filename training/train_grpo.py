@@ -74,8 +74,10 @@ def main():
         MODEL_NAME,
         device_map="auto",
         quantization_config=bnb_config,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
+    # Force lm_head to float16 to avoid bfloat16/float16 mismatch on T4
+    model.lm_head = model.lm_head.to(torch.float16)
     
     lora_config = LoraConfig(
         r=16,
