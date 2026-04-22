@@ -1,0 +1,16 @@
+name: constrained-refactor-gauntlet
+version: "1.0.0"
+description: "RL environment where an agent refactors a legacy Python codebase while obeying 150 cascading engineering rules. Reward = CodeScore × ComplianceScore."
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  health: GET /health
+observation_space:
+  files: dict
+  violation_report: dict
+  steps_remaining: int
+  curriculum_level: int
+action_space:
+  tools: [read_file, edit_file, run_tests, check_compliance]
+reward_range: [0.0, 1.0]
+max_steps: 70
