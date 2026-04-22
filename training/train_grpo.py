@@ -10,7 +10,7 @@ import datasets
 MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 
-def reward_function(completions, prompts):
+def reward_function(completions, prompts, **kwargs):
     rewards = []
     
     for prompt, completion in zip(prompts, completions):
