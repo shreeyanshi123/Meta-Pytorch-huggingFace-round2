@@ -4,7 +4,7 @@ import wandb
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import GRPOConfig, GRPOTrainer
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import datasets
 
 MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
@@ -75,11 +75,8 @@ def main():
         device_map="auto",
         quantization_config=bnb_config,
     )
-    # Cast ALL non-quantized params to float16 (T4 doesn't support bfloat16,
-    # and lm_head is float32 while hidden states are bfloat16 → mismatch)
-    for name, param in model.named_parameters():
-        if param.dtype in (torch.bfloat16, torch.float32):
-            param.data = param.data.to(torch.float16)
+    # Prepare quantized model for training (casts non-quantized layers properly)
+    model = prepare_model_for_kbit_training(model)
     
     lora_config = LoraConfig(
         r=16,
@@ -91,7 +88,6 @@ def main():
     )
     
     model = get_peft_model(model, lora_config)
-    model.gradient_checkpointing_enable()
 
     training_args = GRPOConfig(
         output_dir="./grpo_output",
@@ -102,6 +98,8 @@ def main():
         num_generations=4,
         save_steps=50,
         logging_steps=10,
+        bf16=False,
+        fp16=True,
         report_to="wandb" if os.getenv("WANDB_API_KEY") else "none"
     )
     
