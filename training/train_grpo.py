@@ -74,10 +74,12 @@ def main():
         MODEL_NAME,
         device_map="auto",
         quantization_config=bnb_config,
-        dtype=torch.float16,
     )
-    # Force lm_head to float16 to avoid bfloat16/float16 mismatch on T4
-    model.lm_head = model.lm_head.to(torch.float16)
+    # Cast ALL non-quantized params (embeddings, norms, lm_head) from bfloat16
+    # to float16, since T4 GPU does not support bfloat16 operations
+    for param in model.parameters():
+        if param.dtype == torch.bfloat16:
+            param.data = param.data.to(torch.float16)
     
     lora_config = LoraConfig(
         r=16,
