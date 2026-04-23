@@ -1,371 +1,309 @@
 import os
-import re
 import json
 import requests
-import wandb
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from trl import GRPOConfig, GRPOTrainer
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-import datasets
+from trl import GRPOConfig, GRPOTrainer
 
+# ── Config ────────────────────────────────────────────────────────────────
 MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
-ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+ENV_URL    = os.getenv("ENV_URL", "http://localhost:7860")  # your HF Space URL here
 
-# ─── Code samples for varied training prompts ───────────────────────────
-CODE_SAMPLES = [
-    {
-        "filename": "utils.py",
-        "code": """import os, sys, json
-def processData(x):
-    result = []
-    for i in range(len(x)):
-        if x[i] > 0:
-            result.append(x[i] * 2)
-        else:
-            result.append(0)
-    return result
-
-def calc(a,b,c,d,e,f):
-    return a+b+c+d-e*f
-
-class myClass:
-    def __init__(self, val):
-        self.val = val
-    def get(self):
-        return self.val
-""",
-        "issues": "snake_case violations, no type hints, no docstrings, too many parameters in calc()"
-    },
-    {
-        "filename": "data_handler.py",
-        "code": """import requests
-import json
-import os
-
-def getData(url):
-    r = requests.get(url)
-    data = json.loads(r.text)
-    result = []
-    for item in data:
-        tmp = {}
-        tmp['name'] = item['name']
-        tmp['value'] = item['value']
-        tmp['id'] = item['id']
-        result.append(tmp)
-    return result
-
-def saveData(data, path):
-    f = open(path, 'w')
-    f.write(json.dumps(data))
-    f.close()
-
-def loadData(path):
-    f = open(path, 'r')
-    data = json.loads(f.read())
-    f.close()
-    return data
-""",
-        "issues": "no context managers for files, no error handling, camelCase naming, no type hints"
-    },
-    {
-        "filename": "api_client.py",
-        "code": """import requests
-
-class apiClient:
-    def __init__(self, base_url, token):
-        self.base_url = base_url
-        self.token = token
-
-    def makeRequest(self, endpoint, method, data=None):
-        url = self.base_url + endpoint
-        headers = {'Authorization': 'Bearer ' + self.token}
-        if method == 'GET':
-            r = requests.get(url, headers=headers)
-        elif method == 'POST':
-            r = requests.post(url, headers=headers, json=data)
-        elif method == 'PUT':
-            r = requests.put(url, headers=headers, json=data)
-        elif method == 'DELETE':
-            r = requests.delete(url, headers=headers)
-        return r.json()
-
-    def getUser(self, id):
-        return self.makeRequest('/users/' + str(id), 'GET')
-
-    def createUser(self, data):
-        return self.makeRequest('/users', 'POST', data)
-""",
-        "issues": "camelCase methods, string concatenation instead of f-strings, no error handling, no type hints"
-    },
-    {
-        "filename": "logger.py",
-        "code": """import datetime
-
-log_data = []
-
-def log(msg):
-    global log_data
-    log_data.append(str(datetime.datetime.now()) + ' ' + msg)
-
-def getLog():
-    global log_data
-    return log_data
-
-def clearLog():
-    global log_data
-    log_data = []
-
-def saveLog(path):
-    global log_data
-    f = open(path, 'w')
-    for l in log_data:
-        f.write(l + '\\n')
-    f.close()
-""",
-        "issues": "global state, no class encapsulation, no log levels, no context manager, camelCase naming"
-    },
-    {
-        "filename": "validator.py",
-        "code": """def validate(data):
-    errors = []
-    if not data.get('name'):
-        errors.append('name required')
-    if not data.get('email'):
-        errors.append('email required')
-    if data.get('email') and '@' not in data['email']:
-        errors.append('invalid email')
-    if not data.get('age'):
-        errors.append('age required')
-    if data.get('age') and (data['age'] < 0 or data['age'] > 150):
-        errors.append('invalid age')
-    if not data.get('password'):
-        errors.append('password required')
-    if data.get('password') and len(data['password']) < 8:
-        errors.append('password too short')
-    return errors
-""",
-        "issues": "no type hints, no docstring, deeply nested logic, magic numbers, no validation class"
-    },
-]
-
-SYSTEM_PROMPT = """You are an expert Python code refactoring agent. You will receive Python code with quality issues.
-Your task is to refactor the code following these engineering standards:
-1. Use snake_case for functions and variables
-2. Add type hints to all function signatures
-3. Add docstrings to all functions and classes
-4. Use context managers (with statements) for file operations
-5. Handle errors with try/except blocks
-6. Follow single responsibility principle
-7. Remove global state, use classes instead
-8. Use f-strings instead of string concatenation
-9. Add proper logging instead of print statements
-10. Keep functions under 20 lines
-
-Output your refactored code as a JSON array:
-[{"filename": "example.py", "content": "refactored code here"}]
-
-IMPORTANT: Output ONLY the JSON array, no explanations before or after."""
-
-
-def build_training_prompts():
-    """Build varied training prompts from code samples."""
-    prompts = []
-    for sample in CODE_SAMPLES:
-        prompt = f"""Refactor the following Python file to comply with engineering standards.
-
-### {sample['filename']}
-```python
-{sample['code']}
-```
-
-Known issues: {sample['issues']}
-
-Output your refactored version as a JSON array with "filename" and "content" keys."""
-        # Repeat each prompt to fill the dataset
-        prompts.extend([prompt] * 20)
-    return prompts
-
-
-def reward_function(completions, prompts, **kwargs):
+# ── Environment class using OpenEnv environment_factory pattern ───────────
+class RefactorEnv:
     """
-    Evaluate model completions based on code quality.
-    This creates reward VARIANCE between generations, which is critical for GRPO.
+    OpenEnv-compatible environment class.
+    Each instance = one episode.
+    Tool methods = the 4 actions the agent can take.
+    """
+    def __init__(self):
+        self.episode_id   = None
+        self.observation  = None
+        self.reward       = 0.0
+        self.done         = False
+
+    def reset(self, **kwargs) -> str:
+        """Start a fresh episode — gets a new broken codebase + active rules."""
+        self.reward = 0.0
+        self.done   = False
+        try:
+            resp = requests.post(f"{ENV_URL}/reset", json={}, timeout=30)
+            data = resp.json()
+            self.episode_id  = data["episode_id"]
+            self.observation = data["observation"]
+            # Return the initial observation as a string the model can read
+            return self._format_observation(self.observation)
+        except Exception as e:
+            return f"Environment error on reset: {e}"
+
+    def read_file(self, filename: str) -> str:
+        """
+        Read a file from the current codebase.
+        Args:
+            filename: Name of the file to read (e.g. utils.py)
+        Returns:
+            File contents as a string.
+        """
+        return self._step({"tool": "read_file", "args": {"filename": filename}})
+
+    def edit_file(self, filename: str, content: str) -> str:
+        """
+        Edit a file in the codebase. Triggers rule engine and violation report.
+        Args:
+            filename: Name of the file to edit
+            content: New complete content of the file
+        Returns:
+            Violation report showing triggered and resolved rules.
+        """
+        return self._step({"tool": "edit_file", "args": {"filename": filename, "content": content}})
+
+    def run_tests(self) -> str:
+        """
+        Run pytest on the current codebase.
+        Returns:
+            Test results including pass rate.
+        """
+        return self._step({"tool": "run_tests", "args": {}})
+
+    def check_compliance(self) -> str:
+        """
+        Check current compliance status — lists outstanding rule obligations.
+        Returns:
+            Current outstanding violations and compliance score.
+        """
+        return self._step({"tool": "check_compliance", "args": {}})
+
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _step(self, action: dict) -> str:
+        """Send one action to the environment, update state."""
+        if self.done or not self.episode_id:
+            return "Episode already ended."
+        try:
+            resp = requests.post(f"{ENV_URL}/step", json={
+                "episode_id": self.episode_id,
+                "action": action
+            }, timeout=60)
+            result = resp.json()
+            self.observation = result.get("observation", self.observation)
+            self.done = result.get("done", False)
+
+            if self.done:
+                self.reward = result.get("reward", 0.0)
+                return self._format_final(result)
+            else:
+                return self._format_step(result)
+        except Exception as e:
+            return f"Environment error: {e}"
+
+    def _format_observation(self, obs: dict) -> str:
+        """Format observation into a readable string for the model."""
+        files = list(obs.get("files", {}).keys())
+        violations = obs.get("violation_report", {}).get("still_outstanding", [])
+        steps = obs.get("steps_remaining", 70)
+        level = obs.get("curriculum_level", 1)
+        return (
+            f"EPISODE START\n"
+            f"Files: {files}\n"
+            f"Active rules: {obs.get('active_rules_count', 20)}\n"
+            f"Steps remaining: {steps}\n"
+            f"Curriculum level: {level}\n"
+            f"Outstanding violations: {violations}\n"
+            f"Use read_file() to inspect files, edit_file() to fix them, "
+            f"run_tests() to check quality, check_compliance() to see rule status."
+        )
+
+    def _format_step(self, result: dict) -> str:
+        """Format step result for the model."""
+        obs = result.get("observation", {})
+        vr  = obs.get("violation_report", {})
+        return (
+            f"Steps remaining: {obs.get('steps_remaining', '?')}\n"
+            f"Newly triggered rules: {vr.get('newly_triggered', [])}\n"
+            f"Newly resolved rules:  {vr.get('newly_resolved', [])}\n"
+            f"Still outstanding:     {vr.get('still_outstanding', [])}\n"
+            f"Conflict flags:        {vr.get('conflict_flags', [])}"
+        )
+
+    def _format_final(self, result: dict) -> str:
+        """Format final episode result."""
+        reward = result.get("reward", 0.0)
+        info   = result.get("info", {})
+        return (
+            f"EPISODE COMPLETE\n"
+            f"Total Reward:      {reward:.4f}\n"
+            f"Code Score:        {info.get('code_score', 'N/A')}\n"
+            f"Compliance Score:  {info.get('compliance_score', 'N/A')}\n"
+            f"Final Violations:  {info.get('final_violations', 'N/A')}"
+        )
+
+
+# ── Reward function (TRL-compatible) ─────────────────────────────────────
+def reward_func(completions: list[str], prompts: list, **kwargs) -> list[float]:
+    """
+    TRL calls this with the model's text completions.
+    We spin up a RefactorEnv episode for each completion,
+    parse the model's JSON tool call, execute it, then
+    finish the episode to get the real CodeScore × ComplianceScore.
+    Falls back to 0.0 if the server is not running.
     """
     rewards = []
-
     for completion in completions:
-        score = 0.0
+        env = RefactorEnv()
+        obs = env.reset()       # start fresh episode
+        if env.episode_id is None:
+            # Server not reachable — fallback to 0
+            rewards.append(0.0)
+            continue
 
-        # ── 1. Format reward: does it output parseable JSON? (0.0 - 0.2) ──
-        edits = []
-        try:
-            # Try to find a JSON array in the completion
-            json_match = re.search(r'\[.*\]', completion, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    score += 0.15
-                    edits = parsed
-                    # Bonus for having correct keys
-                    if all(isinstance(e, dict) and "filename" in e and "content" in e for e in parsed):
-                        score += 0.05
-        except (json.JSONDecodeError, Exception):
-            pass
+        # --- parse & execute tool calls from completion ---
+        # The model outputs JSON like: {"tool": "edit_file", "args": {...}}
+        obs = _dispatch_tool(env, completion)
 
-        # ── 2. Valid Python reward: can the code compile? (0.0 - 0.25) ──
-        valid_code_count = 0
-        total_code = max(len(edits), 1)
-        for edit in edits:
-            if isinstance(edit, dict) and "content" in edit:
-                try:
-                    compile(edit["content"], edit.get("filename", "<string>"), "exec")
-                    valid_code_count += 1
-                except SyntaxError:
-                    pass
-        if valid_code_count > 0:
-            score += 0.25 * (valid_code_count / total_code)
+        # If not done yet, finish the episode explicitly
+        if not env.done:
+            env._step({"tool": "finish", "args": {}})
 
-        # ── 3. Style compliance reward (0.0 - 0.25) ──
-        code_text = ""
-        for edit in edits:
-            if isinstance(edit, dict) and "content" in edit:
-                code_text += edit["content"] + "\n"
-
-        if code_text:
-            style_points = 0
-            checks = 0
-
-            # snake_case functions (no camelCase)
-            checks += 1
-            camel_funcs = re.findall(r'def\s+[a-z]+[A-Z]', code_text)
-            if len(camel_funcs) == 0:
-                style_points += 1
-
-            # Type hints present
-            checks += 1
-            typed_funcs = re.findall(r'def\s+\w+\([^)]*:\s*\w+', code_text)
-            all_funcs = re.findall(r'def\s+\w+\(', code_text)
-            if len(all_funcs) > 0 and len(typed_funcs) / max(len(all_funcs), 1) > 0.5:
-                style_points += 1
-
-            # Docstrings present
-            checks += 1
-            docstrings = re.findall(r'""".*?"""', code_text, re.DOTALL)
-            if len(docstrings) >= 1:
-                style_points += 1
-
-            # Context managers for file ops
-            checks += 1
-            has_open = "open(" in code_text
-            has_with = "with open(" in code_text
-            if not has_open or has_with:
-                style_points += 1
-
-            # Error handling
-            checks += 1
-            if "try:" in code_text or "except" in code_text:
-                style_points += 1
-
-            if checks > 0:
-                score += 0.25 * (style_points / checks)
-
-        # ── 4. Code substantiveness: not trivially short (0.0 - 0.15) ──
-        code_len = len(code_text.strip())
-        if code_len > 200:
-            score += 0.10
-        if code_len > 500:
-            score += 0.05
-
-        # ── 5. Penalty: if completion is empty or just prose (0.0 - 0.1) ──
-        if "def " in completion or "class " in completion:
-            score += 0.1
-
-        rewards.append(round(min(score, 1.0), 4))
-
+        rewards.append(float(env.reward) if env.reward else 0.0)
     return rewards
 
 
+def build_dataset(n_episodes: int = 5) -> Dataset:
+    prompt = [{
+        "role": "system",
+        "content": "You are a code refactoring agent. Always respond with exactly ONE JSON tool call."
+    },
+    {
+        "role": "user",
+        "content": """You have a broken Python codebase. Fix it using these tools.
+
+TOOL CALL FORMAT — you must output EXACTLY this JSON structure:
+{"tool": "read_file", "args": {"filename": "utils.py"}}
+{"tool": "edit_file", "args": {"filename": "utils.py", "content": "def my_func() -> None:\\n    pass"}}
+{"tool": "run_tests", "args": {}}
+{"tool": "check_compliance", "args": {}}
+
+RULES:
+- Output ONE tool call per response
+- Always start by reading files before editing them
+- After each edit_file, check what violations remain
+- Your goal: fix all violations to maximize reward
+
+Start now. What is your first action?"""
+    }]
+    return Dataset.from_dict({"prompt": [prompt] * n_episodes})
+
+# ── Main ───────────────────────────────────────────────────────────────────
 def main():
     print("Loading tokenizer and model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Set up 4-bit quantization for Colab T4
-    from transformers import BitsAndBytesConfig
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16
     )
-
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         device_map="auto",
-        quantization_config=bnb_config,
+        quantization_config=bnb_config
     )
-    # Prepare quantized model for training (casts non-quantized layers properly)
     model = prepare_model_for_kbit_training(model)
-
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=16,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.0,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-
-    model = get_peft_model(model, lora_config)
+    model = get_peft_model(model, LoraConfig(
+        r=16, lora_alpha=16,
+        target_modules=["q_proj","k_proj","v_proj","o_proj",
+                        "gate_proj","up_proj","down_proj"],
+        lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"
+    ))
 
     training_args = GRPOConfig(
         output_dir="./grpo_output",
         learning_rate=5e-6,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=2,
-        max_steps=50,
+        max_steps=5,
         num_generations=2,
         save_steps=25,
-        logging_steps=5,
-        bf16=False,
-        fp16=False,
+        logging_steps=1,          # print reward every step
+        bf16=False, fp16=False,
         max_completion_length=512,
-        report_to="wandb" if os.getenv("WANDB_API_KEY") else "none"
+        report_to="none"
     )
-
-    # Build dataset with varied, informative prompts
-    prompts = build_training_prompts()
-    train_dataset = datasets.Dataset.from_dict({"prompt": prompts})
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=reward_function,
+        reward_funcs=reward_func,
         args=training_args,
-        train_dataset=train_dataset,
+        train_dataset=build_dataset(5),
         processing_class=tokenizer,
+        # environment_factory is NOT a standard TRL param;
+        # RefactorEnv is called inside reward_func instead
     )
 
     print("Starting GRPO Training...")
     trainer.train()
 
-    # Save the final adapter
     model.save_pretrained("./grpo_output/final_adapter")
     tokenizer.save_pretrained("./grpo_output/final_adapter")
-    print("\n✅ Training complete! Adapter saved to ./grpo_output/final_adapter")
+    print("\n✅ Training complete!")
 
-    # ── Quick evaluation ──
-    print("\n--- Evaluation: Reward scores on 5 test prompts ---")
-    test_prompts = [build_training_prompts()[i] for i in range(0, 25, 5)]
-    for i, prompt in enumerate(test_prompts):
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=512, do_sample=True, temperature=0.7)
-        completion = tokenizer.decode(output[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        reward = reward_function([completion], [prompt])[0]
-        print(f"  Prompt {i+1}: reward = {reward:.4f} | length = {len(completion)} chars")
+    # ── Must disable gradient checkpointing before inference / eval ──────
+    model.gradient_checkpointing_disable()
+    model.config.use_cache = True
+    model.eval()
+
+    # ── Proper evaluation using full episodes ──
+    print("\n--- Evaluation: Full Environment Episodes ---")
+    print(f"{'Episode':>8} | {'Init Viol':>9} | {'Final Viol':>10} | "
+          f"{'Code Score':>10} | {'Comp Score':>10} | {'Total Reward':>12}")
+    print("-" * 70)
+
+    for i in range(5):
+        env = RefactorEnv()
+        obs_str = env.reset()
+        init_viol = len(env.observation["violation_report"]["still_outstanding"])
+
+        # Run up to 70 steps
+        for _ in range(70):
+            if env.done:
+                break
+            inputs = tokenizer(obs_str, return_tensors="pt",
+                               truncation=True, max_length=1024).to(model.device)
+            with torch.no_grad():
+                out = model.generate(**inputs, max_new_tokens=256,
+                                     do_sample=True, temperature=0.3)
+            action_text = tokenizer.decode(
+                out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            # Parse and call the right tool
+            obs_str = _dispatch_tool(env, action_text)
+
+        final_viol = len(env.observation["violation_report"]["still_outstanding"])
+        print(f"{i+1:>8} | {init_viol:>9} | {final_viol:>10} | "
+              f"{'N/A':>10} | {'N/A':>10} | {env.reward:>12.4f}")
+
+
+def _dispatch_tool(env: RefactorEnv, action_text: str) -> str:
+    """Parse model output and call the correct tool."""
+    try:
+        action = json.loads(action_text)
+        tool = action.get("tool", "check_compliance")
+        args = action.get("args", {})
+        if tool == "read_file":
+            return env.read_file(args.get("filename", "main.py"))
+        elif tool == "edit_file":
+            return env.edit_file(args.get("filename"), args.get("content", ""))
+        elif tool == "run_tests":
+            return env.run_tests()
+        else:
+            return env.check_compliance()
+    except:
+        return env.check_compliance()
+
 
 if __name__ == "__main__":
     main()
