@@ -73,8 +73,18 @@ class CodeQualityEvaluator:
     def _compute_module_size(self, files: dict) -> float:
         if not files:
             return 0.0
-        compliant_files = sum(1 for content in files.values() if len(content.split('\n')) <= 200)
-        return compliant_files / len(files)
+        # Soft scoring: <200 lines → 1.0, >500 lines → 0.0, linear in between.
+        # Hard 200-line cutoff always returned 0 for the injected bloated files.
+        scores = []
+        for content in files.values():
+            n = len(content.split('\n'))
+            if n <= 200:
+                scores.append(1.0)
+            elif n >= 500:
+                scores.append(0.0)
+            else:
+                scores.append(1.0 - (n - 200) / 300.0)
+        return sum(scores) / len(scores)
 
     def evaluate(self, files: dict) -> CodeScore:
         with tempfile.TemporaryDirectory() as temp_dir:

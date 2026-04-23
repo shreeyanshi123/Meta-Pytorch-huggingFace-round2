@@ -110,13 +110,22 @@ class RuleEngine:
                     new_spawns.append(spawn_id)
                     report.newly_triggered.add(spawn_id)
         
-        # Checking logic mock (normally evaluates AST or diffs)
-        resolved_this_step = set()
-        for rid in list(state.outstanding_obligations):
-            # In a real environment, AST/regex checks would go here.
-            # We randomly mock resolve for standard rules, but check contradiction pairs
-            pass
-            
+        # Heuristic resolution: edit_file actions make progress on outstanding rules.
+        # Each edit resolves up to 3 obligations (simulates the agent fixing code).
+        if action_type == "edit_file" and state.outstanding_obligations:
+            import random
+            resolve_count = min(3, len(state.outstanding_obligations))
+            # Prefer to resolve rules that DON'T have spawn conflicts
+            candidates = sorted(
+                state.outstanding_obligations,
+                key=lambda r: len(self.rules[r].spawns) if r in self.rules else 0
+            )
+            to_resolve = candidates[:resolve_count]
+            for rid in to_resolve:
+                state.outstanding_obligations.discard(rid)
+                state.resolved_rules.add(rid)
+                report.newly_resolved.add(rid)
+
         # Detect contradictions (e.g. Rule 142 vs Rule 143)
         if 142 in state.outstanding_obligations and 143 in state.outstanding_obligations:
             conflict_msg = "Contradiction detected between Rule 142 and 143"
@@ -131,4 +140,5 @@ class RuleEngine:
         if not state.triggered_rules:
             return 1.0
         compliant = len(state.triggered_rules) - len(state.outstanding_obligations)
-        return compliant / len(state.triggered_rules)
+        score = compliant / len(state.triggered_rules)
+        return max(0.0, min(1.0, score))
