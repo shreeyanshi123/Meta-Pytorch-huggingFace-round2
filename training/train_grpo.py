@@ -290,7 +290,7 @@ def main():
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.bfloat16,   # ← was float16; bfloat16 avoids gradient underflow
     )
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
@@ -320,9 +320,10 @@ def main():
         num_generations=2,
         save_steps=25,
         logging_steps=1,
-        bf16=False,
+        bf16=True,                   # ← was False; matches bfloat16 compute dtype
         fp16=False,
         max_completion_length=512,
+        gradient_checkpointing=True, # ← enables gradient flow through LoRA layers
         report_to="none",
     )
 
