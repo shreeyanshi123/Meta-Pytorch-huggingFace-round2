@@ -118,12 +118,60 @@ print(f"  Reward for good refactor: {good_rewards[0]:.3f} (expected: >0.3)")
 # Test 3d: Track B standalone
 print("\n  --- Test 3d: Track B (Compliance) standalone ---")
 checker = ComplianceChecker(STANDARDS_PATH)
-checker.reset(ep['files'], ep['rules_active'])
+checker.reset(ep['files'], ep['rules_active'], seed=42)
 for fname in ep['files']:
     checker.step({"tool": "edit_file", "args": {"filename": fname}}, f"Edited {fname}")
 score_b = checker.get_score()
 print(f"  Compliance score: {score_b:.3f}")
 print(f"  Outstanding rules: {len(checker.get_outstanding())}")
+
+# Test 3e: Deterministic compliance
+print("\n  --- Test 3e: Deterministic compliance check ---")
+checker2 = ComplianceChecker(STANDARDS_PATH)
+checker2.reset(ep['files'], ep['rules_active'], seed=42)
+for fname in ep['files']:
+    checker2.step({"tool": "edit_file", "args": {"filename": fname}}, f"Edited {fname}")
+score_b2 = checker2.get_score()
+assert score_b == score_b2, f"Non-deterministic! {score_b} != {score_b2}"
+print(f"  ✅ Deterministic: both runs = {score_b:.3f}")
+
+# ============================================================
+# TEST 3.5: Adversarial Robustness
+# ============================================================
+print("\n" + "=" * 60)
+print("TEST 3.5: Adversarial Robustness")
+print("=" * 60)
+
+# Null agent: empty completion
+null_rewards = reward_function(
+    completions=[""],
+    prompts=["test"],
+    files=[json.dumps(ep['files'])],
+    rules_active=[json.dumps(ep['rules_active'])]
+)
+assert null_rewards[0] < 0, f"Null agent should be penalized, got {null_rewards[0]}"
+print(f"  ✅ Null agent penalized: {null_rewards[0]:.3f}")
+
+# Format-only agent: valid XML but trivial content
+format_only = '<file name="api.py">pass</file>'
+format_rewards = reward_function(
+    completions=[format_only],
+    prompts=["test"],
+    files=[json.dumps(ep['files'])],
+    rules_active=[json.dumps(ep['rules_active'])]
+)
+print(f"  ✅ Format-only agent: {format_rewards[0]:.3f} (should be low)")
+
+# Copy-paste agent: returns original code unchanged
+copy_fname = list(ep['files'].keys())[0]
+copy_paste = f'<file name="{copy_fname}">{ep["files"][copy_fname]}</file>'
+copy_rewards = reward_function(
+    completions=[copy_paste],
+    prompts=["test"],
+    files=[json.dumps(ep['files'])],
+    rules_active=[json.dumps(ep['rules_active'])]
+)
+print(f"  ✅ Copy-paste agent: {copy_rewards[0]:.3f} (should be < 0.5)")
 
 # ============================================================
 # TEST 4: Model Loading + Generation

@@ -13,3 +13,9 @@ venv.bak/
 *.log
 .venv
 grpo_output/
+grpo_output_verify/
+evaluation_results.json
+.grpo_sig.txt
+OpenEnv_Hackathon_Resources.pdf
+Meta_OpenEnv_Hackathon_Participant_Help_Guide.pdf
+OpenEnv_Hackathon_FAQs.pdf

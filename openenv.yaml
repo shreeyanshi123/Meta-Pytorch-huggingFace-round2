@@ -1,16 +1,34 @@
 name: constrained-refactor-gauntlet
 version: "1.0.0"
-description: "RL environment where an agent refactors a legacy Python codebase while obeying 150 cascading engineering rules. Reward = CodeScore × ComplianceScore."
+description: >
+  RL environment where an agent refactors a legacy Python codebase
+  while obeying 150 cascading engineering rules.
+  Reward = CodeScore × ComplianceScore.
+spec_version: 1
+client:
+  class_name: ConstrainedRefactorClient
+  module: environment.client
+action:
+  class_name: RefactorAction
+  module: environment.track_a
+observation:
+  class_name: RefactorObservation
+  module: environment.track_a
+default_image: constrained-refactor-gauntlet:latest
+repository_url: https://github.com/shreeyanshi123/Meta-Pytorch-huggingFace-round2
 endpoints:
   reset: POST /reset
   step: POST /step
   health: GET /health
-observation_space:
-  files: dict
-  violation_report: dict
-  steps_remaining: int
-  curriculum_level: int
-action_space:
-  tools: [read_file, edit_file, run_tests, check_compliance]
 reward_range: [0.0, 1.0]
 max_steps: 70
+setup_instructions: |
+  1. pip install -r requirements.txt
+  2. python server.py
+  3. python training/train_grpo.py
+  4. python evaluate_agent.py
+evaluation_criteria:
+  - Environment complexity (150 cascading rules with contradictions)
+  - Reward signal quality (multiplicative CodeScore × ComplianceScore)
+  - Agent performance (LoRA-tuned Qwen2.5-Coder-7B via GRPO)
+  - Adversarial robustness (contradiction detection, reward hacking prevention)
